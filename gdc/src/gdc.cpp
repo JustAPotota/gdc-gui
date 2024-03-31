@@ -91,7 +91,6 @@ void get_connected_gamepads(dmHID::HContext context, dmHID::HGamepad gamepads[],
     for (uint32_t i = 0; i < dmHID::MAX_GAMEPAD_COUNT; i++) {
         gamepad = dmHID::GetGamepad(context, i);
         if (dmHID::IsGamepadConnected(gamepad)) {
-            dmLogInfo("yay");
             gamepads[(*gamepad_count)++] = gamepad;
         }
     }
@@ -108,8 +107,112 @@ static int lua_get_connected_gamepads(lua_State* L) {
 
     lua_createtable(L, gamepad_count, 0);
     for (uint32_t i = 0; i < gamepad_count; i++) {
-        lua_pushlightuserdata(L, gamepads[i]);
+        *(dmHID::HGamepad*)lua_newuserdata(L, sizeof(dmHID::HGamepad)) = gamepads[i];
+        //lua_pushlightuserdata(L, gamepads[i]);
         lua_rawseti(L, -2, i+1);
+    }
+
+    return 1;
+}
+
+static int lua_get_gamepad_name(lua_State* L) {
+    DM_LUA_STACK_CHECK(L, 1);
+
+    dmHID::HGamepad* gamepad = (dmHID::HGamepad*)lua_touserdata(L, 1);
+
+    char gamepad_name[128];
+    dmHID::GetGamepadDeviceName(g_HidContext, *gamepad, gamepad_name, sizeof(gamepad_name));
+
+    lua_pushstring(L, gamepad_name);
+
+    return 1;
+}
+
+static int lua_get_platform_name(lua_State* L) {
+    DM_LUA_STACK_CHECK(L, 1);
+    lua_pushstring(L, DM_PLATFORM);
+    return 1;
+}
+
+static int lua_get_gamepad_packet(lua_State* L) {
+    DM_LUA_STACK_CHECK(L, 1);
+
+    dmHID::HGamepad* gamepad = (dmHID::HGamepad*)lua_touserdata(L, 1);
+
+    dmHID::GamepadPacket* packet = (dmHID::GamepadPacket*)lua_newuserdata(L, sizeof(dmHID::GamepadPacket));
+    dmHID::Update(g_HidContext);
+    dmHID::GetGamepadPacket(*gamepad, packet);
+
+    return 1;
+}
+
+static int lua_compare_packets(lua_State* L) {
+    DM_LUA_STACK_CHECK(L, 4);
+
+    dmHID::GamepadPacket* previous_packet = (dmHID::GamepadPacket*)lua_touserdata(L, 1);
+    dmHID::GamepadPacket* current_packet = (dmHID::GamepadPacket*)lua_touserdata(L, 2);
+
+    dmInputDDF::GamepadType input_type;
+    uint32_t index;
+    float value;
+    float delta;
+    GetDelta(previous_packet, current_packet, &input_type, &index, &value, &delta);
+
+    lua_pushinteger(L, input_type);
+    lua_pushinteger(L, index);
+    lua_pushnumber(L, value);
+    lua_pushnumber(L, delta);
+
+    return 4;
+}
+
+static int lua_should_ignore_trigger(lua_State* L) {
+    DM_LUA_STACK_CHECK(L, 1);
+
+    int trigger_id = luaL_checkint(L, 1);
+    lua_pushboolean(L,
+        trigger_id == dmInputDDF::GAMEPAD_CONNECTED ||
+        trigger_id == dmInputDDF::GAMEPAD_DISCONNECTED ||
+        trigger_id == dmInputDDF::GAMEPAD_RAW
+    );
+
+    return 1;
+}
+
+static int lua_get_trigger_name(lua_State* L) {
+    DM_LUA_STACK_CHECK(L, 1);
+
+    int trigger_id = luaL_checkint(L, 1);
+    if (trigger_id < dmInputDDF::MAX_GAMEPAD_COUNT) {
+        lua_pushstring(L, dmInputDDF_Gamepad_DESCRIPTOR.m_EnumValues[trigger_id].m_Name);
+    } else {
+        lua_pushnil(L);
+    }
+
+    return 1;
+}
+
+static int lua_get_input_type_name(lua_State* L) {
+    DM_LUA_STACK_CHECK(L, 1);
+
+    int input_type = luaL_checkint(L, 1);
+    if (input_type == dmInputDDF::GAMEPAD_TYPE_AXIS || input_type == dmInputDDF::GAMEPAD_TYPE_HAT || input_type == dmInputDDF::GAMEPAD_TYPE_BUTTON) {
+        lua_pushstring(L, dmInputDDF_GamepadType_DESCRIPTOR.m_EnumValues[input_type].m_Name);
+    } else {
+        lua_pushnil(L);
+    }
+
+    return 1;
+}
+
+static int lua_get_modifier_name(lua_State* L) {
+    DM_LUA_STACK_CHECK(L, 1);
+
+    int modifier = luaL_checkint(L, 1);
+    if (modifier < dmInputDDF::MAX_GAMEPAD_MODIFIER_COUNT && modifier >= 0) {
+        lua_pushstring(L, dmInputDDF_GamepadModifier_DESCRIPTOR.m_EnumValues[modifier].m_Name);
+    } else {
+        lua_pushnil(L);
     }
 
     return 1;
@@ -117,7 +220,6 @@ static int lua_get_connected_gamepads(lua_State* L) {
 
 int not_main(int argc, char *argv[])
 {
-
     int result = 0;
     dmHID::HGamepad gamepad = dmHID::INVALID_GAMEPAD_HANDLE;
     dmHID::HGamepad gamepads[dmHID::MAX_GAMEPAD_COUNT];
@@ -236,12 +338,12 @@ int not_main(int argc, char *argv[])
         bool run = true;
         while (run)
         {
-            if (g_SkipTrigger) {
-                printf("Skipping trigger.\n");
-                driver.m_Triggers[i].m_Skip = true;
-                g_SkipTrigger = false;
-                break;
-            }
+            // if (g_SkipTrigger) {
+            //     printf("Skipping trigger.\n");
+            //     driver.m_Triggers[i].m_Skip = true;
+            //     g_SkipTrigger = false;
+            //     break;
+            // }
 
             dmHID::Update(g_HidContext);
             dmHID::GetGamepadPacket(gamepad, &packet);
@@ -265,11 +367,11 @@ int not_main(int argc, char *argv[])
                         driver.m_Triggers[i].m_Type = gamepad_type;
                         driver.m_Triggers[i].m_Index = index;
                         if (dmMath::Abs(delta) > 1.5f)
-                        driver.m_Triggers[i].m_Modifiers[dmInputDDF::GAMEPAD_MODIFIER_SCALE] = true;
+                            driver.m_Triggers[i].m_Modifiers[dmInputDDF::GAMEPAD_MODIFIER_SCALE] = true;
                         else if (gamepad_type == dmInputDDF::GAMEPAD_TYPE_AXIS)
-                        driver.m_Triggers[i].m_Modifiers[dmInputDDF::GAMEPAD_MODIFIER_CLAMP] = true;
+                            driver.m_Triggers[i].m_Modifiers[dmInputDDF::GAMEPAD_MODIFIER_CLAMP] = true;
                         if (delta < 0.0f)
-                        driver.m_Triggers[i].m_Modifiers[dmInputDDF::GAMEPAD_MODIFIER_NEGATE] = true;
+                            driver.m_Triggers[i].m_Modifiers[dmInputDDF::GAMEPAD_MODIFIER_NEGATE] = true;
 
                         if (gamepad_type == dmInputDDF::GAMEPAD_TYPE_HAT) {
                             driver.m_Triggers[i].m_HatMask = (uint32_t)value;
@@ -314,33 +416,34 @@ int not_main(int argc, char *argv[])
 
 void GetDelta(dmHID::GamepadPacket* prev_packet, dmHID::GamepadPacket* packet, dmInputDDF::GamepadType* gamepad_type, uint32_t* index, float* value, float* delta)
 {
-    float max_delta = -1.0f;
+    float highest_delta = -1.0f;
     for (uint32_t i = 0; i < dmHID::MAX_GAMEPAD_AXIS_COUNT; ++i)
     {
-        if (dmMath::Abs(packet->m_Axis[i] - prev_packet->m_Axis[i]) > max_delta)
+        if (dmMath::Abs(packet->m_Axis[i] - prev_packet->m_Axis[i]) > highest_delta)
         {
-            max_delta = dmMath::Abs(packet->m_Axis[i] - prev_packet->m_Axis[i]);
+            highest_delta = dmMath::Abs(packet->m_Axis[i] - prev_packet->m_Axis[i]);
             if (gamepad_type != 0x0)
-            *gamepad_type = dmInputDDF::GAMEPAD_TYPE_AXIS;
+                *gamepad_type = dmInputDDF::GAMEPAD_TYPE_AXIS;
             if (index != 0x0)
-            *index = i;
+                *index = i;
             if (value != 0x0)
-            *value = packet->m_Axis[i];
+                *value = packet->m_Axis[i];
             if (delta != 0x0)
-            *delta = packet->m_Axis[i] - prev_packet->m_Axis[i];
+                *delta = packet->m_Axis[i] - prev_packet->m_Axis[i];
         }
     }
+
     for (uint32_t i = 0; i < dmHID::MAX_GAMEPAD_HAT_COUNT; ++i)
     {
         if (prev_packet->m_Hat[i] != packet->m_Hat[i]) {
             if (gamepad_type != 0x0)
-            *gamepad_type = dmInputDDF::GAMEPAD_TYPE_HAT;
+                *gamepad_type = dmInputDDF::GAMEPAD_TYPE_HAT;
             if (index != 0x0)
-            *index = i;
+                *index = i;
             if (value != 0x0)
-            *value = packet->m_Hat[i];
+                *value = packet->m_Hat[i];
             if (delta != 0x0)
-            *delta = 1.0f;
+                *delta = 1.0f;
         }
     }
     for (uint32_t i = 0; i < dmHID::MAX_GAMEPAD_BUTTON_COUNT; ++i)
@@ -348,13 +451,13 @@ void GetDelta(dmHID::GamepadPacket* prev_packet, dmHID::GamepadPacket* packet, d
         if (dmHID::GetGamepadButton(packet, i))
         {
             if (gamepad_type != 0x0)
-            *gamepad_type = dmInputDDF::GAMEPAD_TYPE_BUTTON;
+                *gamepad_type = dmInputDDF::GAMEPAD_TYPE_BUTTON;
             if (index != 0x0)
-            *index = i;
+                *index = i;
             if (value != 0x0)
-            *value = 1.0f;
+                *value = 1.0f;
             if (delta != 0x0)
-            *delta = 1.0f;
+                *delta = 1.0f;
         }
     }
 }
@@ -394,6 +497,14 @@ void DumpDriver(FILE* out, Driver* driver)
 static const luaL_reg Module_methods[] =
 {
     {"get_connected_gamepads", lua_get_connected_gamepads},
+    {"get_gamepad_name", lua_get_gamepad_name},
+    {"get_gamepad_packet", lua_get_gamepad_packet},
+    {"compare_packets", lua_compare_packets},
+    {"get_platform_name", lua_get_platform_name},
+    {"should_ignore_trigger", lua_should_ignore_trigger},
+    {"get_trigger_name", lua_get_trigger_name},
+    {"get_input_type_name", lua_get_input_type_name},
+    {"get_modifier_name", lua_get_modifier_name},
     {0, 0}
 };
 
@@ -403,6 +514,23 @@ static void LuaInit(lua_State* L)
 
     // Register lua names
     luaL_register(L, MODULE_NAME, Module_methods);
+
+    lua_pushinteger(L, dmInputDDF::MAX_GAMEPAD_COUNT - 1);
+    lua_setfield(L, -2, "GAMEPAD_TRIGGER_COUNT");
+
+    lua_pushinteger(L, dmInputDDF::GAMEPAD_TYPE_AXIS);
+    lua_setfield(L, -2, "INPUT_TYPE_AXIS");
+    lua_pushinteger(L, dmInputDDF::GAMEPAD_TYPE_HAT);
+    lua_setfield(L, -2, "INPUT_TYPE_HAT");
+    lua_pushinteger(L, dmInputDDF::GAMEPAD_TYPE_BUTTON);
+    lua_setfield(L, -2, "INPUT_TYPE_BUTTON");
+
+    lua_pushinteger(L, dmInputDDF::GAMEPAD_MODIFIER_SCALE);
+    lua_setfield(L, -2, "MODIFIER_SCALE");
+    lua_pushinteger(L, dmInputDDF::GAMEPAD_MODIFIER_CLAMP);
+    lua_setfield(L, -2, "MODIFIER_CLAMP");
+    lua_pushinteger(L, dmInputDDF::GAMEPAD_MODIFIER_NEGATE);
+    lua_setfield(L, -2, "MODIFIER_NEGATE");
 
     lua_pop(L, 1);
     assert(top == lua_gettop(L));

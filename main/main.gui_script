@@ -1,0 +1,368 @@
+local STATE_START = 0 -- List gamepads and wait for user to select one
+local STATE_CALIBRATION = 1 -- Wait until no inputs are detected to get a baseline
+local STATE_MAPPING = 2
+local STATE_FINISHED = 3
+
+local MAX_TRIGGER = 24
+
+local COLOR_MOD_ACTIVE = vmath.vector4(0.14, 0.15, 0.16, 1)
+local COLOR_MOD_INACTIVE = vmath.vector4(0.56, 0.57, 0.58, 1)
+
+local function table_empty(t)
+	return next(t) == nil
+end
+
+-- Set the end of the node's text to "..." if it's too long
+local function truncate_text(node)
+	local font_name = gui.get_font(node)
+	local font = gui.get_font_resource(font_name)
+
+	local node_width = gui.get_size(node).x
+	local text = gui.get_text(node)
+
+	local metrics = resource.get_text_metrics(font, text)
+	if metrics.width <= node_width then
+		return
+	end
+
+	local length = #text
+	repeat
+		length = length - 1
+		local metrics = resource.get_text_metrics(font, text:sub(1, length) .. "...")
+	until metrics.width <= node_width
+
+	gui.set_text(node, text:sub(1, length) .. "...")
+end
+
+local function button(node, action_id, action, on_click)
+	if type(node) == "string" then
+		node = gui.get_node(node .. "/root")
+	end
+
+	if not gui.is_enabled(node, true) then return end
+
+	if action_id == hash("touch") then
+		local size = gui.get_size(node)
+		local position = gui.get_position(node)
+		if action.pressed and gui.pick_node(node, action.x, action.y) then
+			gui.play_flipbook(node, "grey_button13")
+			gui.set_size(node, vmath.vector3(size.x, size.y - 4, size.z))
+			gui.set_position(node, vmath.vector3(position.x, position.y - 2, position.z))
+		elseif action.released and gui.get_flipbook(node) == hash("grey_button13") then
+			gui.play_flipbook(node, "grey_button12")
+			gui.set_size(node, vmath.vector3(size.x, size.y + 4, size.z))
+			gui.set_position(node, vmath.vector3(position.x, position.y + 2, position.z))
+			if gui.pick_node(node, action.x, action.y) then
+				on_click()
+			end
+		end
+	end
+end
+
+local function recreate_gamepad_list(self, gamepads)
+	if self.gamepad_list_buttons then
+		for i = 1,#self.gamepad_list_buttons do
+			gui.delete_node(self.gamepad_list_buttons[i])
+			self.gamepad_list_buttons[i] = nil
+		end
+	else
+		self.gamepad_list_buttons = {}
+	end
+
+	if #gamepads == 0 then
+		gui.set_text(gui.get_node("gamepad_list_header"), "Connect a gamepad...")
+		return
+	else
+		gui.set_text(gui.get_node("gamepad_list_header"), "Select a gamepad:")
+	end
+
+	for i, gamepad in ipairs(gamepads) do
+		local tree = gui.clone_tree(gui.get_node("controller_list_button/root"))
+		local button = tree["controller_list_button/root"]
+		local text =  tree["controller_list_button/text"]
+		gui.set_parent(button, gui.get_node("page_start"))
+		gui.set_position(button, vmath.vector3(0, i*-60 + 150, 0))
+		gui.set_text(text, gdc.get_gamepad_name(gamepad))
+		truncate_text(text)
+
+		self.gamepad_list_buttons[i] = button
+	end
+end
+
+local CALIBRATION_TIME = 2
+local function begin_calibration(self)
+	gui.set_text(gui.get_node("gamepad_header"), "Calibrating gamepad, please don't press anything...")
+	gui.set_enabled(gui.get_node("page_start"), false)
+	gui.set_enabled(gui.get_node("page_gamepad"), true)
+	gui.set_enabled(gui.get_node("confirm_buttons"), false)
+	gui.set_enabled(gui.get_node("skip_trigger/root"), false)
+	timer.cancel(self.gamepad_timer)
+
+	self.state = STATE_CALIBRATION
+	self.calibration_timer = CALIBRATION_TIME
+	self.baseline_packet = gdc.get_gamepad_packet(self.gamepad)
+end
+
+local function set_current_trigger(self, id)
+	if self.current_trigger then
+		gui.set_color(self.trigger_nodes[self.current_trigger].text, vmath.vector4(1, 1, 1, 1))
+	end
+
+	if id > MAX_TRIGGER then
+		return true
+	end
+
+	gui.set_color(self.trigger_nodes[id].text, vmath.vector4(1, 0, 0, 1))
+	self.driver.triggers[id] = {}
+	self.current_trigger = id
+end
+
+local function begin_mapping(self)
+	self.state = STATE_MAPPING
+	self.map_timer = 0.5
+	self.driver = {
+		platform = gdc.get_platform_name(),
+		device = gdc.get_gamepad_name(self.gamepad),
+		dead_zone = 0.2,
+		triggers = {}
+	}
+	set_current_trigger(self, 0)
+	gui.set_text(gui.get_node("gamepad_header"), "Press the highlighted button on your gamepad:")
+	gui.set_enabled(gui.get_node("confirm_buttons"), false)
+	gui.set_enabled(gui.get_node("skip_trigger/root"), true)
+end
+
+local function driver_to_string(driver)
+	local s = "driver\n{\n"
+	s = s .. ('\tdevice: "%s"\n'):format(driver.device)
+	s = s .. ('\tplatform: "%s"\n'):format(driver.platform)
+	s = s .. ('\tdead_zone: %.3f\n'):format(driver.dead_zone)
+	for trigger_id = 0,#driver.triggers do
+		local trigger = driver.triggers[trigger_id]
+		if not table_empty(trigger) then
+			local trigger_name = gdc.get_trigger_name(trigger_id)
+			local input_type = gdc.get_input_type_name(trigger.input_type)
+			s = s .. ("\tmap { input: %s type: %s index: %d "):format(trigger_name, input_type, trigger.index)
+
+			if trigger.hat_mask then
+				s = s .. ("hat_mask: %d "):format(trigger.hat_mask)
+			end
+
+			for modifier, enabled in pairs(trigger.modifiers) do
+				if enabled then
+					s = s .. ("mod { mod: %s } "):format(gdc.get_modifier_name(modifier))
+				end
+			end
+
+			s = s .. "}\n"
+		end
+	end
+
+	s = s .. "}"
+
+	return s
+end
+
+local function load_existing_driver(device_name)
+	local platform = gdc.get_platform_name()
+	local text = assert(sys.load_resource("/builtins/input/default.gamepadsc"))
+	print('%s+device: "' .. device_name .. '"\n%s+platform: "' .. platform .. '"')
+	local a, b = text:find('%s+device: "' .. device_name .. '"\n%s+platform: "' .. platform .. '"')
+	print(a, b)
+end
+
+local function finish_mapping(self)
+	self.state = STATE_FINISHED
+	pprint(self.driver)
+	print(driver_to_string(self.driver))
+	gui.set_enabled(gui.get_node("confirm_buttons"), true)
+	gui.set_enabled(gui.get_node("skip_trigger/root"), false)
+end
+
+local function next_trigger(self)
+	local reached_last_trigger = set_current_trigger(self, self.current_trigger + 1)
+	if reached_last_trigger then
+		finish_mapping(self)
+	end
+	self.map_timer = 0.5
+end
+
+local function previous_trigger(self)
+	if self.current_trigger <= 0 then return end
+	set_current_trigger(self, self.current_trigger - 1)
+	self.map_timer = 0.5
+end
+
+local function update_trigger_nodes(nodes, data)
+	gui.set_text(nodes.text, data.index)
+
+	gui.set_color(nodes.scale, data.modifiers[gdc.MODIFIER_SCALE] and COLOR_MOD_ACTIVE or COLOR_MOD_INACTIVE)
+	gui.set_color(nodes.clamp, data.modifiers[gdc.MODIFIER_CLAMP] and COLOR_MOD_ACTIVE or COLOR_MOD_INACTIVE)
+	gui.set_color(nodes.negate, data.modifiers[gdc.MODIFIER_NEGATE] and COLOR_MOD_ACTIVE or COLOR_MOD_INACTIVE)
+end
+
+function init(self)
+	msg.post(".", "acquire_input_focus")
+
+	gui.set_enabled(gui.get_node("page_start"), true)
+	gui.set_enabled(gui.get_node("page_gamepad"), false)
+
+	gui.set_enabled(gui.get_node("tooltip"), false)
+
+	self.trigger_nodes = {}
+	for trigger_id = 0,MAX_TRIGGER do
+		local template_name = "trigger_" .. trigger_id .. "/"
+		local nodes = {
+			root = gui.get_node(template_name .. "root"),
+			icon = gui.get_node(template_name .. "icon"),
+			text = gui.get_node(template_name .. "text"),
+			negate = gui.get_node(template_name .. "negate"),
+			clamp = gui.get_node(template_name .. "clamp"),
+			scale = gui.get_node(template_name .. "scale")
+		}
+
+		self.trigger_nodes[trigger_id] = nodes
+	end
+
+	self.gamepads = gdc.get_connected_gamepads()
+	recreate_gamepad_list(self, self.gamepads)
+
+	self.gamepad_timer = timer.delay(0.5, true, function(self, handle)
+		local new_gamepads = gdc.get_connected_gamepads()
+		if #self.gamepads ~= #new_gamepads then
+			recreate_gamepad_list(self, new_gamepads)
+			self.gamepads = new_gamepads
+		end
+	end)
+
+	self.state = STATE_START
+end
+
+function final(self)
+	-- Add finalization code here
+	-- Learn more: https://defold.com/manuals/script/
+	-- Remove this function if not needed
+end
+
+function update(self, dt)
+	if self.state == STATE_CALIBRATION then
+		-- Keep reading packets until no change is detected for CALIBRATION_TIME seconds
+		-- then use that packet as the baseline to compare to (i.e. a packet with no buttons pressed)
+		local packet = gdc.get_gamepad_packet(self.gamepad)
+		local input_type, index, value, delta = gdc.compare_packets(self.baseline_packet, packet)
+		self.baseline_packet = packet
+
+		if math.abs(delta) > 0.015 then
+			-- User pressed something, start the timer over
+			self.calibration_timer = CALIBRATION_TIME
+		else
+			self.calibration_timer = self.calibration_timer - dt
+			if self.calibration_timer <= 0 then
+				begin_mapping(self)
+				print("Calibration successful!")
+			end
+		end
+	elseif self.state == STATE_MAPPING then
+		local packet = gdc.get_gamepad_packet(self.gamepad)
+		local input_type, index, value, delta = gdc.compare_packets(self.baseline_packet, packet)
+		if math.abs(delta) < 0.7 then
+			self.map_timer = 0.5
+		else
+			self.map_timer = self.map_timer - dt
+			if self.map_timer <= 0 then
+				local trigger_data = self.driver.triggers[self.current_trigger]
+				trigger_data.input_type = input_type
+				trigger_data.index = index
+
+				if input_type == gdc.INPUT_TYPE_HAT then
+					trigger_data.hat_mask = value
+				end
+
+				trigger_data.modifiers = {
+					[gdc.MODIFIER_SCALE] = math.abs(delta) > 1.5,
+					[gdc.MODIFIER_CLAMP] = input_type == gdc.INPUT_TYPE_AXIS,
+					[gdc.MODIFIER_NEGATE] = delta < 0
+				}
+
+				pprint(self.current_trigger, trigger_data)
+				update_trigger_nodes(self.trigger_nodes[self.current_trigger], trigger_data)
+
+				next_trigger(self)
+			end
+		end
+	end
+end
+
+function on_message(self, message_id, message, sender)
+	-- Add message-handling code here
+	-- Learn more: https://defold.com/manuals/message-passing/
+	-- Remove this function if not needed
+end
+
+local function tooltipable(node, text, action)
+	if gui.pick_node(node, action.x, action.y) then
+		gui.set_enabled(gui.get_node("tooltip"), true)
+		gui.set_text(gui.get_node("tooltip_text"), text)
+		return true
+	end
+	return false
+end
+
+function on_input(self, action_id, action)
+	if action_id == hash("touch") then
+		if self.state == STATE_START then
+			for i, node in ipairs(self.gamepad_list_buttons) do
+				button(node, action_id, action, function()
+					self.gamepad = self.gamepads[i]
+					print("selected", gdc.get_gamepad_name(self.gamepad))
+					begin_calibration(self)
+					print(load_existing_driver(gdc.get_gamepad_name(self.gamepad)))
+				end)
+			end
+		elseif self.state == STATE_MAPPING then
+			button("skip_trigger", action_id, action, function()
+				next_trigger(self)
+			end)
+		elseif self.state == STATE_FINISHED then
+			button("retry", action_id, action, function()
+				begin_calibration(self)
+			end)
+			button("save", action_id, action, function()
+				print("woah")
+			end)
+		end
+	end
+
+	if not action_id and self.state ~= STATE_START then
+		local tooltip = gui.get_node("tooltip")
+		local tooltip_text = gui.get_node("tooltip_text")
+		local tooltip_pos = vmath.vector3(action.x + 10, action.y - 10, 0)
+
+		if tooltip_pos.x + 250 > gui.get_width() then
+			tooltip_pos.x = tooltip_pos.x - 200
+		end
+
+		gui.set_position(tooltip, tooltip_pos)
+
+		for i = 0,#self.trigger_nodes do
+			local nodes = self.trigger_nodes[i]
+			local tooltip_shown =
+				tooltipable(nodes.negate, "Modifier: Negate", action) or
+				tooltipable(nodes.clamp, "Modifier: Clamp", action) or
+				tooltipable(nodes.scale, "Modifier: Scale", action) or
+				tooltipable(nodes.icon, gdc.get_trigger_name(i), action)
+
+			if tooltip_shown then
+				break
+			else
+				gui.set_enabled(tooltip, false)
+			end
+		end
+	end
+end
+
+function on_reload(self)
+	-- Add reload-handling code here
+	-- Learn more: https://defold.com/manuals/hot-reload/
+	-- Remove this function if not needed
+end
