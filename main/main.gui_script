@@ -163,6 +163,42 @@ local function driver_to_string(driver)
 	return s
 end
 
+local function pretty_trigger_data(id, trigger_data)
+	local trigger_name = gdc.get_trigger_name(id)
+	local input_type = gdc.get_input_type_name(trigger_data.input_type)
+
+	local modifiers = {}
+	for modifier, enabled in pairs(trigger_data.modifiers) do
+		if enabled then table.insert(modifiers, gdc.get_modifier_name(modifier)) end
+	end
+
+	local pretty = ("%s\nIndex: %d\nType: %s"):format(trigger_name, trigger_data.index, input_type)
+
+	if #trigger_data.modifiers > 0 then
+		pretty = pretty .. "\nModifiers: "
+		for modifier, enabled in pairs(trigger_data.modifiers) do
+			if enabled then
+				pretty = pretty .. gdc.get_modifier_name(modifier) .. ", "
+			end
+		end
+		pretty = pretty:sub(1,-3)
+	end
+
+	if trigger_data.hat_mask then
+		local hat_mask_string = ""
+		for i = 3,0,-1 do
+			if bit.band(trigger_data.hat_mask, bit.lshift(1, i)) > 0 then
+				hat_mask_string = hat_mask_string .. "1"
+			else
+				hat_mask_string = hat_mask_string .. "0"
+			end
+		end
+		pretty = pretty .. "\nHat mask: " .. hat_mask_string
+	end
+
+	return pretty
+end
+
 local function load_existing_driver(device_name)
 	local platform = gdc.get_platform_name()
 	local text = assert(sys.load_resource("/builtins/input/default.gamepadsc"))
@@ -196,9 +232,17 @@ end
 local function update_trigger_nodes(nodes, data)
 	gui.set_text(nodes.text, data.index)
 
-	gui.set_color(nodes.scale, data.modifiers[gdc.MODIFIER_SCALE] and COLOR_MOD_ACTIVE or COLOR_MOD_INACTIVE)
-	gui.set_color(nodes.clamp, data.modifiers[gdc.MODIFIER_CLAMP] and COLOR_MOD_ACTIVE or COLOR_MOD_INACTIVE)
-	gui.set_color(nodes.negate, data.modifiers[gdc.MODIFIER_NEGATE] and COLOR_MOD_ACTIVE or COLOR_MOD_INACTIVE)
+	if data.input_type == gdc.INPUT_TYPE_AXIS then
+		gui.play_flipbook(nodes.type_icon, "generic_stick")
+	elseif data.input_type == gdc.INPUT_TYPE_HAT then
+		gui.play_flipbook(nodes.type_icon, "xbox_dpad")
+	elseif data.input_type == gdc.INPUT_TYPE_BUTTON then
+		gui.play_flipbook(nodes.type_icon, "generic_button")
+	end
+
+-- 	gui.set_color(nodes.scale, data.modifiers[gdc.MODIFIER_SCALE] and COLOR_MOD_ACTIVE or COLOR_MOD_INACTIVE)
+-- 	gui.set_color(nodes.clamp, data.modifiers[gdc.MODIFIER_CLAMP] and COLOR_MOD_ACTIVE or COLOR_MOD_INACTIVE)
+-- 	gui.set_color(nodes.negate, data.modifiers[gdc.MODIFIER_NEGATE] and COLOR_MOD_ACTIVE or COLOR_MOD_INACTIVE)
 end
 
 function init(self)
@@ -215,10 +259,8 @@ function init(self)
 		local nodes = {
 			root = gui.get_node(template_name .. "root"),
 			icon = gui.get_node(template_name .. "icon"),
-			text = gui.get_node(template_name .. "text"),
-			negate = gui.get_node(template_name .. "negate"),
-			clamp = gui.get_node(template_name .. "clamp"),
-			scale = gui.get_node(template_name .. "scale")
+			type_icon = gui.get_node(template_name .. "type_icon"),
+			text = gui.get_node(template_name .. "text")
 		}
 
 		self.trigger_nodes[trigger_id] = nodes
@@ -301,8 +343,13 @@ end
 
 local function tooltipable(node, text, action)
 	if gui.pick_node(node, action.x, action.y) then
-		gui.set_enabled(gui.get_node("tooltip"), true)
-		gui.set_text(gui.get_node("tooltip_text"), text)
+		local tooltip_node = gui.get_node("tooltip")
+		local text_node = gui.get_node("tooltip_text")
+		local metrics = resource.get_text_metrics(gui.get_font_resource(gui.get_font(text_node)), text)
+		gui.set_enabled(tooltip_node, true)
+		gui.set_size(tooltip_node, vmath.vector3(metrics.width + 10, metrics.height + 10, 0))
+		gui.set_size(text_node, vmath.vector3(metrics.width, metrics.height, 0))
+		gui.set_text(text_node, text)
 		return true
 	end
 	return false
@@ -344,18 +391,17 @@ function on_input(self, action_id, action)
 
 		gui.set_position(tooltip, tooltip_pos)
 
-		for i = 0,#self.trigger_nodes do
-			local nodes = self.trigger_nodes[i]
-			local tooltip_shown =
-				tooltipable(nodes.negate, "Modifier: Negate", action) or
-				tooltipable(nodes.clamp, "Modifier: Clamp", action) or
-				tooltipable(nodes.scale, "Modifier: Scale", action) or
-				tooltipable(nodes.icon, gdc.get_trigger_name(i), action)
+		if self.driver then
+			for trigger_id = 0,#self.driver.triggers-1 do
+				local nodes = self.trigger_nodes[trigger_id]
+				local trigger_data = self.driver.triggers[trigger_id]
+				local tooltip_shown = tooltipable(nodes.root, pretty_trigger_data(trigger_id, trigger_data), action)
 
-			if tooltip_shown then
-				break
-			else
-				gui.set_enabled(tooltip, false)
+				if tooltip_shown then
+					break
+				else
+					gui.set_enabled(tooltip, false)
+				end
 			end
 		end
 	end
