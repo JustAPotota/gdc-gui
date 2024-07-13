@@ -10,6 +10,8 @@ height = 640
 
 [project]
 title = gdc-gui
+custom_resources = /input_ddf.proto
+dependencies#0 = https://github.com/Melsoft-Games/defold-protobuf/archive/master.zip
 
 [library]
 include_dirs = myextension

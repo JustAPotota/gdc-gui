@@ -91,6 +91,21 @@ local function recreate_gamepad_list(self, gamepads)
 	end
 end
 
+---@param trigger Map
+local function update_trigger_nodes(nodes, trigger)
+	gui.set_text(nodes.text, trigger.index or "-")
+
+	if trigger.input_type == gdc.INPUT_TYPE_AXIS then
+		gui.play_flipbook(nodes.type_icon, "generic_stick")
+	elseif trigger.input_type == gdc.INPUT_TYPE_HAT then
+		gui.play_flipbook(nodes.type_icon, "xbox_dpad")
+	elseif trigger.input_type == gdc.INPUT_TYPE_BUTTON then
+		gui.play_flipbook(nodes.type_icon, "generic_button")
+	else
+		gui.play_flipbook(nodes.type_icon, "generic_button_square_outline")
+	end
+end
+
 local CALIBRATION_TIME = 2
 local function begin_calibration(self)
 	gui.set_text(gui.get_node("gamepad_header"), "Calibrating gamepad, please don't press anything...")
@@ -99,6 +114,11 @@ local function begin_calibration(self)
 	gui.set_enabled(gui.get_node("confirm_buttons"), false)
 	gui.set_enabled(gui.get_node("skip_trigger/root"), false)
 	timer.cancel(self.gamepad_timer)
+
+	self.driver = drivers.find_driver(self.drivers, self.gamepad) or drivers.new_driver(self.gamepad)
+	for i, map in ipairs(self.driver.maps) do
+		update_trigger_nodes(self.trigger_nodes[map.input], map)
+	end
 
 	self.state = STATE_CALIBRATION
 	self.calibration_timer = CALIBRATION_TIME
@@ -122,12 +142,6 @@ end
 local function begin_mapping(self)
 	self.state = STATE_MAPPING
 	self.map_timer = 0.5
-	self.driver = {
-		platform = gdc.get_platform_name(),
-		device = gdc.get_gamepad_name(self.gamepad),
-		dead_zone = 0.2,
-		triggers = {}
-	}
 	set_current_trigger(self, 0)
 	gui.set_text(gui.get_node("gamepad_header"), "Press the highlighted button on your gamepad:")
 	gui.set_enabled(gui.get_node("confirm_buttons"), false)
@@ -170,16 +184,6 @@ local function pretty_trigger_data(id, trigger_data)
 	return pretty
 end
 
-local function load_existing_driver(device_name)
-	drivers.fetch_latest_gamepads(function(gamepads) io.open("test.json", "w"):write(json.encode(gamepads)) end)
-	local platform = gdc.get_platform_name()
-	local text = assert(sys.load_resource("/builtins/input/default.gamepadsc"))
-	drivers.parse_gamepads(text)
-	print('%s+device: "' .. device_name .. '"\n%s+platform: "' .. platform .. '"')
-	local a, b = text:find('%s+device: "' .. device_name .. '"\n%s+platform: "' .. platform .. '"')
-	print(a, b)
-end
-
 local function finish_mapping(self)
 	self.state = STATE_FINISHED
 	pprint(self.driver)
@@ -203,20 +207,6 @@ local function previous_trigger(self)
 	self.map_timer = 0.5
 end
 
-local function update_trigger_nodes(nodes, trigger)
-	gui.set_text(nodes.text, trigger.index or "-")
-
-	if trigger.input_type == gdc.INPUT_TYPE_AXIS then
-		gui.play_flipbook(nodes.type_icon, "generic_stick")
-	elseif trigger.input_type == gdc.INPUT_TYPE_HAT then
-		gui.play_flipbook(nodes.type_icon, "xbox_dpad")
-	elseif trigger.input_type == gdc.INPUT_TYPE_BUTTON then
-		gui.play_flipbook(nodes.type_icon, "generic_button")
-	else
-		gui.play_flipbook(nodes.type_icon, "generic_button_square_outline")
-	end
-end
-
 function init(self)
 	msg.post(".", "acquire_input_focus")
 
@@ -224,6 +214,11 @@ function init(self)
 	gui.set_enabled(gui.get_node("page_gamepad"), false)
 
 	gui.set_enabled(gui.get_node("tooltip"), false)
+
+	drivers.fetch_or_load_gamepads(function(drivers)
+		pprint("gamepads", drivers)
+		self.drivers = drivers
+	end)
 
 	self.trigger_nodes = {}
 	for trigger_id = 0, MAX_TRIGGER do
@@ -284,22 +279,22 @@ function update(self, dt)
 		else
 			self.map_timer = self.map_timer - dt
 			if self.map_timer <= 0 then
-				local trigger_data = self.driver.triggers[self.current_trigger]
-				trigger_data.input_type = input_type
-				trigger_data.index = index
+				local trigger_map = drivers.find_map(self.driver, self.current_trigger)
+				trigger_map.input_type = input_type
+				trigger_map.index = index
 
 				if input_type == gdc.INPUT_TYPE_HAT then
-					trigger_data.hat_mask = value
+					trigger_map.hat_mask = value
 				end
 
-				trigger_data.modifiers = {
+				trigger_map.modifiers = {
 					[gdc.MODIFIER_SCALE] = math.abs(delta) > 1.5,
 					[gdc.MODIFIER_CLAMP] = math.abs(delta) <= 1.5 and input_type == gdc.INPUT_TYPE_AXIS,
 					[gdc.MODIFIER_NEGATE] = delta < 0
 				}
 
-				pprint(self.current_trigger, trigger_data)
-				update_trigger_nodes(self.trigger_nodes[self.current_trigger], trigger_data)
+				pprint(self.current_trigger, trigger_map)
+				update_trigger_nodes(self.trigger_nodes[self.current_trigger], trigger_map)
 
 				next_trigger(self)
 			end
@@ -335,7 +330,6 @@ function on_input(self, action_id, action)
 					self.gamepad = self.gamepads[i]
 					print("selected", gdc.get_gamepad_name(self.gamepad))
 					begin_calibration(self)
-					print(load_existing_driver(gdc.get_gamepad_name(self.gamepad)))
 				end)
 			end
 		elseif self.state == STATE_MAPPING then
@@ -364,17 +358,15 @@ function on_input(self, action_id, action)
 		gui.set_position(tooltip, tooltip_pos)
 
 		if self.driver then
-			for trigger_id = 0, #self.driver.triggers - 1 do
-				local trigger_data = self.driver.triggers[trigger_id]
-				if not table_empty(trigger_data) then
-					local nodes = self.trigger_nodes[trigger_id]
-					local tooltip_shown = tooltipable(nodes.root, pretty_trigger_data(trigger_id, trigger_data), action)
+			for _, map in ipairs(self.driver.maps) do
+				local trigger_id = map.index
+				local nodes = self.trigger_nodes[trigger_id]
+				local is_tooltip_shown = tooltipable(nodes.root, pretty_trigger_data(trigger_id, map), action)
 
-					if tooltip_shown then
-						break
-					else
-						gui.set_enabled(tooltip, false)
-					end
+				if is_tooltip_shown then
+					break
+				else
+					gui.set_enabled(tooltip, false)
 				end
 			end
 		end

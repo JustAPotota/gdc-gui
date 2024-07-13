@@ -18,7 +18,7 @@
 #include <dmsdk/sdk.h>
 
 #if defined(_MSC_VER)
-#include <dlib/safe_windows.h>
+//#include <dlib/safe_windows.h>
 #endif
 
 #include <stdio.h>

@@ -1,4 +1,5 @@
 local constants = require("main.constants")
+local protoc = require("pb.protoc")
 
 local M = {}
 
@@ -9,8 +10,9 @@ local M = {}
 ---@field maps Map[]
 
 ---@class Map
----@field index integer
+---@field input integer
 ---@field input_type integer
+---@field index integer
 ---@field hat_mask integer
 ---@field modifiers integer[]
 
@@ -77,7 +79,8 @@ local function parse_map_string(map_string)
     local hat_mask = match_number(map_string, "hat_mask")
 
     local map = {
-        type = input_type,
+        input = constants.trigger_id(input_name),
+        input_type = input_type,
         index = index,
         hat_mask = hat_mask,
         modifiers = {}
@@ -93,12 +96,12 @@ local function parse_map_string(map_string)
         end
     end
 
-    return constants.trigger_id(input_name), map
+    return map
 end
 
 ---@param gamepads string
 ---@return Driver[]
-function M.parse_gamepads(gamepads)
+function M.parse_gamepads_file(gamepads)
     local drivers = {}
 
     local current_driver = { maps = {} }
@@ -120,10 +123,8 @@ function M.parse_gamepads(gamepads)
 
         local map_string = line:match("map%s*{(.+)}")
         if map_string then
-            local id, map = parse_map_string(map_string)
-            if id then
-                current_driver.maps[id] = map
-            end
+            local map = parse_map_string(map_string)
+            table.insert(current_driver.maps, map)
         end
 
         if line:match("^}") then
@@ -135,16 +136,102 @@ function M.parse_gamepads(gamepads)
     return drivers
 end
 
--- GitHub says to not use the direct URL, but use it we shall (until they inevitably change the format)
+-- GitHub says to not use the direct URL, but use it we shall (until they change the format)
 local GAMEPADS_URL =
 "https://raw.githubusercontent.com/defold/defold/dev/engine/engine/content/builtins/input/default.gamepads"
 
----@param callback fun(gamepads: Driver[])
-function M.fetch_latest_gamepads(callback)
+---@param callback fun(gamepads: Driver[]?)
+function M.fetch_latest_drivers(callback)
     http.request(GAMEPADS_URL, "GET", function(_, _, response)
-        local gamepads = M.parse_gamepads(response.response)
-        callback(gamepads)
+        if response.status >= 200 and response.status < 400 then
+            local drivers = M.parse_gamepads_file(response.response)
+            callback(drivers)
+        else
+            callback(nil)
+        end
     end)
+end
+
+---Parses the built-in .gamepads file and converts it to a Driver[]
+---@return Driver[]
+local function load_drivers()
+    protoc:loadfile("input_ddf.proto")
+    local bytes = sys.load_resource("/builtins/input/default.gamepadsc")
+    local proto_drivers = assert(pb.decode("dmInputDDF.GamepadMaps", bytes)).driver
+
+    local drivers = {}
+    for _, proto_driver in ipairs(proto_drivers) do
+        local driver = {
+            device = proto_driver.device,
+            platform = proto_driver.platform,
+            dead_zone = proto_driver.dead_zone,
+            maps = {}
+        }
+        for _, proto_map in ipairs(proto_driver.map) do
+            local map = {
+                input = constants.trigger_id(proto_map.input),
+                input_type = proto_map.type,
+                index = proto_map.index,
+                hat_mask = proto_map.hat_mask,
+                modifiers = {}
+            }
+            for _, proto_mod in ipairs(proto_map.mod or {}) do
+                table.insert(map.modifiers, constants.modifier_id(proto_mod.mod))
+            end
+            table.insert(driver.maps, map)
+        end
+        table.insert(drivers, driver)
+    end
+
+    return drivers
+end
+
+---Tries to fetch the latest .gamepads from GitHub, or loads the current .gamepads file if the fetch fails
+---@param callback fun(gamepads: Driver[])
+function M.fetch_or_load_gamepads(callback)
+    M.fetch_latest_drivers(function(drivers)
+        if drivers then
+            print("Fetch successful")
+            return callback(drivers)
+        end
+
+        print("Fetch failed, loading local gamepads...")
+        callback(load_drivers())
+    end)
+end
+
+---@param drivers Driver[]
+---@param gamepad userdata
+---@return Driver?
+function M.find_driver(drivers, gamepad)
+    local platform = gdc.get_platform_name()
+    local device = gdc.get_gamepad_name(gamepad)
+
+    for _, driver in ipairs(drivers) do
+        if driver.platform == platform and driver.device == device then
+            return driver
+        end
+    end
+end
+
+---@param gamepad userdata
+---@return Driver
+function M.new_driver(gamepad)
+    return {
+        platform = gdc.get_platform_name(),
+        device = gdc.get_gamepad_name(gamepad),
+        dead_zone = 0.2,
+        triggers = {}
+    }
+end
+
+---@param driver Driver
+---@param index integer
+---@return Map?
+function M.find_map(driver, index)
+    for _, map in ipairs(driver.maps) do
+        if map.index == index then return map end
+    end
 end
 
 return M
