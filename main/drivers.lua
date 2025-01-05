@@ -7,14 +7,14 @@ local M = {}
 ---@field device string
 ---@field platform string
 ---@field dead_zone float
----@field maps Map[]
+---@field maps table<integer, Map>
 
 ---@class Map
----@field input integer
+---@field trigger_id integer
 ---@field input_type integer
 ---@field index integer
 ---@field hat_mask integer
----@field modifiers integer[]
+---@field modifiers table<integer, boolean>
 
 ---@param driver Driver
 ---@return string
@@ -23,23 +23,22 @@ function M.driver_to_string(driver)
     s = s .. ('\tdevice: "%s"\n'):format(driver.device)
     s = s .. ('\tplatform: "%s"\n'):format(driver.platform)
     s = s .. ('\tdead_zone: %.3f\n'):format(driver.dead_zone)
-    for trigger_id = 0, #driver.maps do
-        local map = driver.maps[trigger_id]
-        if not table_empty(map) then
-            local trigger_name = gdc.get_trigger_name(trigger_id)
-            local input_type = gdc.get_input_type_name(map.input_type)
-            s = s .. ("\tmap { input: %s type: %s index: %d "):format(trigger_name, input_type, map.index)
+    for map in M.iter_maps(driver) do
+        local trigger_name = gdc.get_trigger_name(map.trigger_id)
+        local input_type = gdc.get_input_type_name(map.input_type)
+        s = s .. ("\tmap { input: %s type: %s index: %d "):format(trigger_name, input_type, map.index)
 
-            if map.hat_mask then
-                s = s .. ("hat_mask: %d "):format(map.hat_mask)
-            end
-
-            for _, modifier in ipairs(map.modifiers) do
-                s = s .. ("mod { mod: %s } "):format(gdc.get_modifier_name(modifier))
-            end
-
-            s = s .. "}\n"
+        if map.hat_mask then
+            s = s .. ("hat_mask: %d "):format(map.hat_mask)
         end
+
+        for modifier_id, active in pairs(map.modifiers) do
+            if active then
+                s = s .. ("mod { mod: %s } "):format(gdc.get_modifier_name(modifier_id))
+            end
+        end
+
+        s = s .. "}\n"
     end
 
     s = s .. "}"
@@ -74,13 +73,14 @@ local function parse_map_string(map_string)
         return
     end
 
-    local input_type = match_enum(map_string, "type")
+    local trigger_name = match_enum(map_string, "input")
+    local input_type_name = match_enum(map_string, "type")
     local index = match_number(map_string, "index")
     local hat_mask = match_number(map_string, "hat_mask")
 
     local map = {
-        input = constants.trigger_id(input_name),
-        input_type = input_type,
+        trigger_id = constants.trigger_id(trigger_name),
+        input_type = constants.input_type_id(input_type_name),
         index = index,
         hat_mask = hat_mask,
         modifiers = {}
@@ -90,7 +90,7 @@ local function parse_map_string(map_string)
         local mod = match_enum(mod, "mod")
         local modifier_id = constants.modifier_id(mod)
         if modifier_id then
-            table.insert(map.modifiers, modifier_id)
+            map.modifiers[modifier_id] = true
         else
             error("Unknown modifier " .. mod)
         end
@@ -124,7 +124,9 @@ function M.parse_gamepads_file(gamepads)
         local map_string = line:match("map%s*{(.+)}")
         if map_string then
             local map = parse_map_string(map_string)
-            table.insert(current_driver.maps, map)
+            if map then
+                M.set_map(current_driver, map)
+            end
         end
 
         if line:match("^}") then
@@ -169,8 +171,8 @@ local function load_drivers()
         }
         for _, proto_map in ipairs(proto_driver.map) do
             local map = {
-                input = constants.trigger_id(proto_map.input),
-                input_type = proto_map.type,
+                trigger_id = constants.trigger_id(proto_map.input),
+                input_type = constants.input_type_id(proto_map.type),
                 index = proto_map.index,
                 hat_mask = proto_map.hat_mask,
                 modifiers = {}
@@ -178,7 +180,7 @@ local function load_drivers()
             for _, proto_mod in ipairs(proto_map.mod or {}) do
                 table.insert(map.modifiers, constants.modifier_id(proto_mod.mod))
             end
-            table.insert(driver.maps, map)
+            M.set_map(driver, map)
         end
         table.insert(drivers, driver)
     end
@@ -221,16 +223,45 @@ function M.new_driver(gamepad)
         platform = gdc.get_platform_name(),
         device = gdc.get_gamepad_name(gamepad),
         dead_zone = 0.2,
-        triggers = {}
+        maps = {}
     }
 end
 
 ---@param driver Driver
----@param index integer
----@return Map?
-function M.find_map(driver, index)
-    for _, map in ipairs(driver.maps) do
-        if map.index == index then return map end
+---@param trigger_id integer
+---@return Map
+function M.find_map(driver, trigger_id)
+    return driver.maps[trigger_id]
+    -- for _, map in ipairs(driver.maps) do
+    --     if map.trigger_id == trigger then return map end
+    -- end
+    -- local map = { trigger = trigger }
+    -- table.insert(driver.maps, map)
+    -- return map
+end
+
+---@param driver Driver
+---@param map Map
+function M.set_map(driver, map)
+    driver.maps[map.trigger_id] = map
+end
+
+---@param driver Driver
+---@return fun(): Map?
+function M.iter_maps(driver)
+    local i = 0
+    return function()
+        local map = driver.maps[i]
+
+        while map == nil and i < constants.MAX_TRIGGER do
+            i = i + 1
+            map = driver.maps[i]
+        end
+
+        if map == nil then return nil end
+
+        i = i + 1
+        return map
     end
 end
 

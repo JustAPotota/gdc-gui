@@ -324,10 +324,10 @@ static void LuaInit(lua_State* L)
 
     lua_pushinteger(L, dmInputDDF::GAMEPAD_TYPE_AXIS);
     lua_setfield(L, -2, "INPUT_TYPE_AXIS");
-    lua_pushinteger(L, dmInputDDF::GAMEPAD_TYPE_HAT);
-    lua_setfield(L, -2, "INPUT_TYPE_HAT");
     lua_pushinteger(L, dmInputDDF::GAMEPAD_TYPE_BUTTON);
     lua_setfield(L, -2, "INPUT_TYPE_BUTTON");
+    lua_pushinteger(L, dmInputDDF::GAMEPAD_TYPE_HAT);
+    lua_setfield(L, -2, "INPUT_TYPE_HAT");
 
     lua_pushinteger(L, dmInputDDF::GAMEPAD_MODIFIER_SCALE);
     lua_setfield(L, -2, "MODIFIER_SCALE");
